@@ -8,3 +8,4 @@ Pillow  # internal dependency of python-pptx, not used directly by this project
 pytesseract  # OCR fallback for scanned PDFs; also needs the tesseract binary (brew/apt install tesseract)
 faster-whisper  # local audio transcription (meeting recordings), CPU with int8 quantization
 mlx-lm  # light LoRA fine-tuning (Apple Silicon only); see finetune/
+mcp  # MCP server exposing search/chat to Claude Desktop/Code and other clients; see mcp_server.py
