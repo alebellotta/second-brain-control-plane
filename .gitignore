@@ -1,0 +1,13 @@
+venv/
+chroma/
+logs/
+__pycache__/
+*.pyc
+external_folders_config.py
+eval/golden_queries.json
+finetune/data/
+finetune/adapters/
+
+obsidian-plugin/node_modules/
+
+.DS_Store

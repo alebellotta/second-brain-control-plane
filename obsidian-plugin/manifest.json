@@ -1,0 +1,9 @@
+{
+  "id": "second-brain-search",
+  "name": "Second Brain Search",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Local semantic search over the vault using Ollama embeddings and a Chroma index.",
+  "author": "second-brain-oss contributors",
+  "isDesktopOnly": true
+}

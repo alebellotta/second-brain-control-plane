@@ -1,0 +1,15 @@
+{
+  "name": "second-brain-search",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local semantic search for the second brain (Ollama + Chroma)",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --external:obsidian --format=cjs --target=es2020 --platform=node --outfile=main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.23.0",
+    "obsidian": "^1.5.7",
+    "typescript": "^5.5.0"
+  }
+}

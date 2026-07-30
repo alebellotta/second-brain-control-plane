@@ -1,0 +1,10 @@
+[
+  {
+    "query": "Replace this with a question you'd actually ask about a note you have",
+    "expected_path": "Notes/YourFolder/YourNote.md"
+  },
+  {
+    "query": "A second example query, phrased differently than the note's own wording",
+    "expected_path": "Notes/AnotherFolder/AnotherNote.md"
+  }
+]
