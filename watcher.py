@@ -78,6 +78,7 @@ def index_note(path: Path) -> None:
         return
 
     mtime = path.stat().st_mtime
+    start = time.time()
     ids, embeddings, documents, metadatas = [], [], [], []
     for i, chunk in enumerate(chunks):
         embedding = common.ollama_embed(chunk)
@@ -94,6 +95,10 @@ def index_note(path: Path) -> None:
 
     collection.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
     log.info("Indexed %s (%d chunks)", rel, len(ids))
+    common.log_event(
+        "watcher", "index_note", path=rel, chunk_count=len(ids),
+        embedding_model=common.EMBED_MODEL, duration_ms=round((time.time() - start) * 1000),
+    )
 
     if is_generated:
         current_hash = _content_hash(content)
@@ -222,8 +227,11 @@ RELATED NOTES (numbered):
 {numbered}"""
 
     messages = common.system_user_messages(system, user)
+    start = time.time()
     result = common.ollama_chat_json(common.TAG_MODEL, messages, _TAGS_SCHEMA)
+    duration_ms = round((time.time() - start) * 1000)
     if not result:
+        common.log_event("watcher", "tag_link_generation", model=common.TAG_MODEL, duration_ms=duration_ms, ok=False)
         return "", ""
 
     raw_tags = [str(t) for t in result.get("tags", [])][:10]  # cap in code too, not just in the schema
@@ -244,6 +252,10 @@ RELATED NOTES (numbered):
         seen_targets.add(target)
         links.append(f"[[{target}]]")
     links_line = "Links: " + (" ".join(links) if links else "(none relevant)")
+    common.log_event(
+        "watcher", "tag_link_generation", model=common.TAG_MODEL, duration_ms=duration_ms,
+        ok=True, tag_count=len(tags), link_count=len(links),
+    )
     return tag_line, links_line
 
 

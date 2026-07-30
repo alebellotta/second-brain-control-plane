@@ -63,6 +63,27 @@ def setup_logging(name: str) -> logging.Logger:
     return logger
 
 
+EVENTS_LOG_PATH = LOG_DIR / "events.jsonl"
+
+
+def log_event(logger_name: str, event: str, **fields) -> None:
+    """Appends one JSON Lines record to logs/events.jsonl: a timestamp, an
+    operation name, and whatever attributes the caller provides (duration_ms,
+    model, chunk_count, num_sources, ...) — never note content. Adopts
+    OpenTelemetry's span/attribute vocabulary (a named operation with typed
+    attributes) without pulling in the OTel SDK or requiring a collector,
+    which would be disproportionate for a single-machine tool. Swapping this
+    for a real OTel exporter later, if you want to aggregate it elsewhere, is
+    a drop-in change — the shape of the data is already compatible."""
+    try:
+        EVENTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {"ts": time.time(), "logger": logger_name, "event": event, **fields}
+        with EVENTS_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        logging.getLogger(logger_name).exception("Could not write to the structured event log")
+
+
 def is_ignored_path(path: Path) -> bool:
     try:
         rel = path.relative_to(VAULT_DIR)

@@ -15,6 +15,7 @@ One-shot usage (for the Obsidian plugin): reads a JSON payload from stdin
 """
 import json
 import sys
+import time
 
 import common
 
@@ -72,8 +73,13 @@ def ask(question: str, history: list[tuple[str, str]]) -> tuple[str | None, list
         return None, []
 
     messages = build_messages(question, context_chunks, history)
+    start = time.time()
     answer = common.ollama_chat(common.TAG_MODEL, messages)
     sources = sorted({path for path, _, _ in context_chunks})
+    common.log_event(
+        "chat", "ask", model=common.TAG_MODEL, duration_ms=round((time.time() - start) * 1000),
+        ok=answer is not None, context_chunk_count=len(context_chunks), source_count=len(sources),
+    )
     return answer, sources
 
 
