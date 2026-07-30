@@ -1,0 +1,33 @@
+{
+  "updated_at": "2026-07-30T10:55:46.971918+00:00",
+  "ollama_url": "http://localhost:11434",
+  "models": [
+    {
+      "name": "nomic-embed-text",
+      "role": "embedding",
+      "fallback": null,
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "size_gb": 0.27,
+      "installed": true,
+      "notes": "approved 2026-07-30 after quantization benchmark"
+    },
+    {
+      "name": "llama3.2",
+      "role": "tag-link-generation",
+      "fallback": null,
+      "digest": "a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72",
+      "size_gb": 2.02,
+      "installed": true,
+      "notes": ""
+    },
+    {
+      "name": "llama3.2",
+      "role": "daily-digest",
+      "fallback": null,
+      "digest": "a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72",
+      "size_gb": 2.02,
+      "installed": true,
+      "notes": ""
+    }
+  ]
+}
