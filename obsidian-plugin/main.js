@@ -33,6 +33,45 @@ var CHAT_SCRIPT = (0, import_path.join)((0, import_os.homedir)(), ".second-brain
 var N_RESULTS = 8;
 var TIMEOUT_MS = 3e4;
 var CHAT_TIMEOUT_MS = 2e5;
+var LOW_CONFIDENCE_THRESHOLD = 70;
+function getProvenanceBadges(app, path) {
+  const file = app.vault.getAbstractFileByPath(path);
+  if (!(file instanceof import_obsidian.TFile)) return [];
+  const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+  if (!frontmatter) return [];
+  const badges = [];
+  if (frontmatter.policy_decision === "quarantine") {
+    badges.push({ label: "quarantined", color: "var(--text-error)" });
+  }
+  if (frontmatter.external_source === true) {
+    badges.push({ label: "external-readonly", color: "var(--text-muted)" });
+  }
+  if (typeof frontmatter.ocr_confidence === "number") {
+    badges.push(
+      frontmatter.ocr_confidence < LOW_CONFIDENCE_THRESHOLD ? { label: "low-confidence ocr", color: "var(--text-warning)" } : { label: "ocr", color: "var(--text-muted)" }
+    );
+  }
+  if (typeof frontmatter.audio_language_confidence === "number" && frontmatter.audio_language_confidence < LOW_CONFIDENCE_THRESHOLD) {
+    badges.push({ label: "low-confidence transcript", color: "var(--text-warning)" });
+  }
+  return badges;
+}
+function renderProvenanceBadges(container, app, path) {
+  const badges = getProvenanceBadges(app, path);
+  if (!badges.length) return;
+  const badgeRow = container.createDiv({ cls: "sb-provenance-badges" });
+  badgeRow.style.display = "flex";
+  badgeRow.style.gap = "6px";
+  badgeRow.style.marginTop = "4px";
+  for (const badge of badges) {
+    const el = badgeRow.createSpan({ text: badge.label });
+    el.style.fontSize = "0.75em";
+    el.style.padding = "1px 6px";
+    el.style.borderRadius = "4px";
+    el.style.border = `1px solid ${badge.color}`;
+    el.style.color = badge.color;
+  }
+}
 function runSearch(query) {
   return new Promise((resolve, reject) => {
     (0, import_child_process.execFile)(
@@ -142,15 +181,19 @@ var SecondBrainChatModal = class extends import_obsidian.Modal {
     const sourcesEl = this.messagesEl.createDiv({ cls: "sb-chat-sources" });
     sourcesEl.style.alignSelf = "flex-start";
     sourcesEl.style.fontSize = "0.85em";
-    sourcesEl.style.opacity = "0.75";
-    sourcesEl.createSpan({ text: "Sources: " });
-    sources.forEach((path, i) => {
-      const link = sourcesEl.createEl("a", { text: path });
+    sourcesEl.style.opacity = "0.85";
+    sourcesEl.createSpan({ text: "Sources:" });
+    for (const path of sources) {
+      const row = sourcesEl.createDiv();
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "6px";
+      const link = row.createEl("a", { text: path });
       link.style.cursor = "pointer";
       link.style.textDecoration = "underline";
       link.addEventListener("click", () => this.openSource(path));
-      if (i < sources.length - 1) sourcesEl.createSpan({ text: ", " });
-    });
+      renderProvenanceBadges(row, this.app, path);
+    }
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
   async openSource(path) {
@@ -246,6 +289,7 @@ var SecondBrainSearchModal = class extends import_obsidian.Modal {
         text: result.snippet.replace(/\s+/g, " ").slice(0, 220),
         cls: "sb-search-item-snippet"
       }).style.opacity = "0.75";
+      renderProvenanceBadges(item, this.app, result.path);
       item.addEventListener("click", () => this.openResult(result.path));
     }
   }
