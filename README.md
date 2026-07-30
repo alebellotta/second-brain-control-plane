@@ -1,21 +1,37 @@
-# Local Second Brain for Obsidian
+# Second Brain Control Plane
 
 A local-first automation engine that turns an [Obsidian](https://obsidian.md) vault
-into a semantically searchable "second brain" — using only models that run on your
-own machine via [Ollama](https://ollama.com). No document content, embeddings, or
-queries are ever sent to a cloud AI provider.
+into a semantically searchable, **governed** "second brain" — using only models that
+run on your own machine via [Ollama](https://ollama.com). No document content,
+embeddings, or queries are ever sent to a cloud AI provider.
 
 It watches your vault in real time, ingests external documents (PDF, Word,
-PowerPoint, plain text), extracts and structures their content, embeds and indexes
-everything into a local vector store, and — optionally — proposes tags and links
-between related notes. A companion Obsidian plugin adds an in-app search box and a
-RAG chat, both backed by the same local index.
+PowerPoint, plain text, audio), extracts and structures their content, runs every
+candidate document through an ingestion policy (path/size/MIME checks, secret and PII
+detection, cloud-sync detection), embeds and indexes what's allowed into a local
+vector store, and proposes tags and links between related notes. Every generated note
+carries an extended manifest (content hash, resolved path, MIME type, extractor
+version, the model that embedded it, and the policy decision that let it through). A
+companion Obsidian plugin adds an in-app search box and a RAG chat, both showing
+provenance badges from that manifest; an MCP server exposes the same search/chat to
+Claude Desktop, Claude Code, Cursor, and other MCP-compatible clients.
 
-This repository accompanies a short paper on the design decisions and failure modes
-encountered while building it:
+This repository is a direct evolution of an earlier, simpler version — the same
+architecture, extended with the governance layer described above after a
+security-focused review argued that "runs locally" and "is actually governed" are two
+different claims. Both accompanying papers are worth reading together:
 
-📄 **[Building a Private Second Brain: What Breaks When You Keep AI Local, and Why That's the Point](paper/building-a-private-second-brain.pdf)**
-(also available as [Markdown](paper/building-a-private-second-brain.md))
+📄 **[Building a Verifiable Local AI Knowledge System](paper/verifiable-local-ai-knowledge-system.pdf)**
+(also available as [Markdown](paper/verifiable-local-ai-knowledge-system.md)) — this
+repository's paper, covering the control-plane work below in full, including two
+adversarial findings (a real symlink-based ingestion vulnerability, and inconsistent
+prompt-injection resistance) and a mapping of these controls to NIST's AI Risk
+Management Framework and OWASP's LLM Top 10 — offered as a shared vocabulary, not a
+compliance claim.
+
+📄 The original paper, *Building a Private Second Brain*, and the simpler codebase it
+describes, remain available at
+[github.com/alebellotta/local-second-brain](https://github.com/alebellotta/local-second-brain).
 
 It's meant to be read and adapted, not run as-is out of the box on someone else's
 machine — file paths, model names, and the daily-schedule mechanism are all things
@@ -43,26 +59,27 @@ afterthought.
 
 ```
                      ┌──────────────────────────┐
-  cloud drives  ───▶ │ index_external_folders.py│──▶ Notes/  (read-only ingestion,
-  (shared, no        │  (daily, no copying)     │           no duplication)
-  cloning wanted)    └──────────────────────────┘
-                                                          │
-  manually dropped                                        ▼
-  documents      ───▶ Sources/ ──▶ watcher.py ──▶ text extraction (PDF/DOCX/PPTX)
-  (PDF/DOCX/PPTX)                     │                    │
-                                      │                    ▼
-                                      │              Notes/*.md  (generated notes)
-                                      │                    │
-                                      ▼                    ▼
+  cloud drives  ───▶ │ index_external_folders.py│──▶ policy.py ──▶ Notes/ (extended
+  (shared, no        │  (daily, no copying)     │    (allow/           manifest in
+  cloning wanted)    └──────────────────────────┘     quarantine/       frontmatter)
+                                                        deny)                │
+  manually dropped                                        │                 ▼
+  documents      ───▶ Sources/ ──▶ watcher.py ──▶ text extraction ──▶ policy.py
+  (PDF/DOCX/PPTX/                     │            (PDF/DOCX/PPTX/          │
+   audio)                             │             audio)                 ▼
+                                      │                            Notes/*.md (skips
+                                      │                            embedding if
+                                      ▼                            quarantined)
                               chunking + Ollama      tag/link suggestions
-                              embeddings  ──▶  Chroma  (Ollama LLM, appended
-                                (nomic-embed-text)      inline for generated
-                                      │                 notes; kept separate
-                                      ▼                 for hand-written ones)
-                              search.py / Obsidian plugin
-                                (semantic search)
+                              embeddings  ──▶  Chroma  (Ollama /api/chat, JSON
+                                (nomic-embed-text)      schema + sanitizer,
+                                      │                 system/user roles)
+                                      ▼
+                        search.py / chat.py / mcp_server.py / Obsidian plugin
+                          (semantic search, RAG chat, MCP tools, provenance badges)
 
   digest.py (daily) ──▶ Reviews/YYYY-MM-DD.md   (LLM-written summary of the day's changes)
+  policy_decisions.jsonl / events.jsonl ──▶ structured, content-free audit trail
 ```
 
 ### Components
@@ -81,7 +98,9 @@ afterthought.
 - **`obsidian-plugin/`** — a minimal Obsidian plugin exposing an in-app search box
   backed by `search.py`, and a chat modal backed by `chat.py --json` (same
   one-shot-subprocess pattern; the plugin keeps conversation history between
-  messages so `chat.py` itself stays stateless per call).
+  messages so `chat.py` itself stays stateless per call). Both surfaces show small
+  provenance badges (quarantined / external-readonly / ocr / low-confidence) read
+  directly from each note's manifest via Obsidian's own frontmatter cache.
 - **`eval/eval_search.py`** — a small retrieval-quality harness: runs a set of
   (query, expected note) pairs through the same search path a user experiences, and
   reports Precision@1/@3/@5 and mean reciprocal rank. Copy
@@ -102,6 +121,34 @@ afterthought.
   to your corpus. Ships with a synthetic example dataset (`finetune/data.example/`) so
   the mechanism can be tried without a real vault. See "Lessons learned" for what this
   found on a small, real note collection.
+- **`policy.py`** — the ingestion policy module: path/size checks and MIME detection
+  before a file is read, secret/PII pattern detection on the extracted text, and
+  cloud-sync detection for the vault's own storage location. Returns allow/quarantine/
+  deny and writes every decision to `logs/policy_decisions.jsonl` (path and hash only,
+  never content). See "The control plane" below.
+- **`mcp_server.py`** — exposes `search_notes`, `retrieve_note`, `explain_sources`,
+  `daily_digest`, and `healthcheck` over the [Model Context Protocol](https://modelcontextprotocol.io),
+  so Claude Desktop, Claude Code, Cursor, and other MCP clients can query this second
+  brain directly. Reuses `search.py`/`chat.py`/`digest.py` rather than reimplementing
+  retrieval or generation.
+- **`benchmarks/model_registry.py`** — records the Ollama models this project actually
+  depends on (role, digest, size, install status) in `models_registry.json`, refreshable
+  without losing manually-added notes. Complements `quantization_bench.py`, which
+  measures performance rather than recording which models are approved.
+- **`redteam/canary_check.py`** — re-runs a fixed document through tag/link generation
+  and flags significant drift from a saved baseline (by tag-set similarity, not exact
+  match — a local model's sampling isn't fully deterministic). Catches silent
+  regressions after a model, prompt, or chunking change. Needs Ollama; run locally.
+- **`connectors.py`** — a minimal `Connector` protocol (interface only) describing what
+  a future read-only external source would need to implement to plug into this
+  project's ingestion model, with `FilesystemConnector` (matching what
+  `index_external_folders.py` already does) as the one concrete implementation. See
+  "What this repository deliberately does not include."
+- **`tests/`** — a deterministic, Ollama-free pytest suite (policy decisions, the
+  extended manifest, the tag sanitizer, the connector interface) wired into
+  `.github/workflows/test.yml`, plus a small synthetic fixture vault
+  (`tests/fixtures/`) for local, on-demand retrieval-quality checks without needing
+  your own vault.
 
 ### Models used (all via Ollama, all local)
 
@@ -139,11 +186,94 @@ a PDF or DOCX. Not tested against a real meeting recording (multiple speakers,
 background noise, overlapping speech) — expect lower transcription quality there than
 with clean synthetic audio.
 
+## The control plane
+
+The piece that turns this from "a local RAG pipeline" into something closer to
+governed infrastructure, per the accompanying paper's Section 7.
+
+### The manifest
+
+Every generated note's frontmatter now includes, beyond the original
+`source_file`/`source_type`/`source_mtime`: `content_hash` (SHA-256 of the extracted
+text), `resolved_path` (the real, symlink-resolved filesystem path the content was
+actually read from), `mime_type`, `extractor_version` (bumped when an extractor's
+logic changes materially), `embedding_model`, `chunking_version`, `indexed_at`,
+`policy_decision`, and `sensitivity_flags`. PDFs that fell back to OCR also carry
+`ocr_confidence`; audio transcripts carry `audio_language`/`audio_language_confidence`.
+None of this needs a database — it's ordinary YAML frontmatter, so a note's own
+provenance travels with the note.
+
+### The policy decision: allow, quarantine, deny
+
+`policy.py` evaluates every candidate document twice: on its path and size before any
+content is read (denying anything whose resolved path escapes the trusted source
+folder — the symlink case below — or that exceeds `MAX_FILE_SIZE`), and on its
+extracted text (quarantining anything matching a secret- or PII-like pattern — an API
+token, an email address, a card-like digit run). A quarantined document is still
+written as a note and recorded by path and content hash, but the watcher (`watcher.py`
+→ `index_note()`) skips semantic embedding for it entirely — it becomes findable by
+exact reference, never by semantic search or chat. All three outcomes are appended to
+`logs/policy_decisions.jsonl`.
+
+### Cloud-sync detection
+
+`policy.detect_cloud_sync()` checks, once at watcher startup, whether the vault's own
+storage path resolves through a known cloud-sync mount (OneDrive, iCloud, Google
+Drive, Dropbox) and logs a warning if so — turning the "local processing isn't the
+same as local storage" finding below from a one-time manual discovery into a standing,
+automatic check.
+
+### Structured event logging
+
+`common.log_event()` appends operation name, duration, model used, and chunk/source
+counts — never note content — to `logs/events.jsonl`, for indexing (`watcher.py`), tag
+generation, and chat (`chat.py`). Adopts OpenTelemetry's span/attribute vocabulary
+without the OTel SDK or a collector, which would be disproportionate for a
+single-machine tool; the data shape is compatible if you want to export it elsewhere
+later.
+
+### Continuous integration
+
+`.github/workflows/test.yml` runs `tests/` (policy, manifest, tag sanitizer, connector
+interface — all deterministic, no Ollama needed) on every push. It deliberately does
+not run retrieval-quality or model-level red-team checks: hosted runners have no local
+model to call. Run those yourself:
+
+```bash
+./venv/bin/python eval/eval_search.py --queries tests/fixtures/golden_queries.json  # against the bundled fixture vault
+./venv/bin/python redteam/prompt_injection_test.py
+./venv/bin/python redteam/canary_check.py
+```
+
+(Point `SECOND_BRAIN_VAULT`/`SECOND_BRAIN_HOME` at `tests/fixtures/vault` and a scratch
+directory first if you want to try the fixture vault without touching your own.)
+
+### MCP server
+
+```bash
+./venv/bin/python mcp_server.py
+```
+
+Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS) — use absolute paths, since MCP servers launch without your shell's PATH/venv:
+
+```json
+{
+  "mcpServers": {
+    "second-brain": {
+      "command": "/absolute/path/to/venv/bin/python",
+      "args": ["/absolute/path/to/mcp_server.py"]
+    }
+  }
+}
+```
+
 ## Setup
 
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
+# ./venv/bin/pip install -r requirements-dev.txt  # instead, if you also want to run tests/
 cp external_folders_config.example.py external_folders_config.py  # if you want external-folder indexing
 ```
 
@@ -309,6 +439,32 @@ because the failure mode is more instructive than the fix.
   failure of the technique; it's a direct consequence of fine-tuning on a genuinely
   small, auto-extracted corpus, which is precisely the caveat worth recording rather
   than glossing over.
+- **A mitigation is not a guarantee, and re-testing after a fix is what tells the
+  difference.** Moving every Ollama call from a single concatenated prompt to explicit
+  `system`/`user` message roles (`/api/chat`) is a real, defensible hardening step —
+  most instruct models weight the two differently. Re-running the exact same
+  English-language tag-injection test from the finding above *after* this change
+  produced the same result: the model still complied. The role separation likely
+  raises the cost of some injection attempts without eliminating the risk category —
+  worth knowing precisely because it would have been easy to assume the fix "worked"
+  without re-testing it against the same adversarial input that motivated it.
+- **A regression check for a non-deterministic system needs a different notion of
+  "pass."** `redteam/canary_check.py` re-runs the same document through tag generation
+  and compares tags against a saved baseline. An exact-match check would fail on
+  almost every run — Ollama's default sampling isn't fully deterministic, confirmed in
+  practice by two consecutive runs of the same canary producing "infrastructure" vs.
+  "infrastructure review" as one of three tags. The check instead measures tag-set
+  similarity (Jaccard) against a threshold, flagging *significant* drift for a human
+  to look at rather than either accepting any output or demanding bit-for-bit
+  reproducibility a probabilistic system can't honestly offer.
+- **CI that runs is more valuable than CI that overpromises.** The test suite wired
+  into GitHub Actions covers exactly what's genuinely deterministic (policy decisions,
+  manifest fields, tag sanitization) and stops there — hosted runners have no local
+  Ollama instance, so retrieval quality and model-level red-teaming stay local,
+  on-demand checks. Scoping the CI honestly to what it can actually verify was a more
+  useful design decision than adding a job that would either need a self-hosted
+  GPU runner or silently mock the one thing (a real local model's behavior) this
+  project exists to test.
 
 ## What this repository deliberately does not include
 
@@ -318,6 +474,22 @@ because the failure mode is more instructive than the fix.
   scheduling preferences.
 - A hosted or one-click deployment — this is meant to be read, adapted, and run on
   your own machine, not operated as a service.
+- API-based connectors for SharePoint/OneDrive-online, Google Drive, Notion, or
+  Slack/Teams exports — `connectors.py` defines the interface a future connector like
+  this would need to satisfy, but each of these needs its own authentication,
+  pagination, and rate-limit handling, which is real, separate engineering left as
+  future work rather than claimed as done.
+- A machine-learning-based sensitivity classifier — `policy.py`'s secret/PII detection
+  is regex-based, catching the obvious, common cases; a real classifier for legal
+  privilege, board material, or subtler PII would need labeled training data and
+  ongoing maintenance disproportionate to this project's scale.
+- A full OpenTelemetry SDK, collector, or dashboard — `common.log_event()` adopts
+  OTel's vocabulary (named operations, attributes, no content) in plain JSON Lines;
+  wiring an actual exporter is a reasonable next step for someone who wants to
+  aggregate this elsewhere, not something this repository ships.
+- Any claim of compliance with NIST's AI RMF or OWASP's LLM Top 10 — the paper maps
+  this project's controls to both frameworks as a shared descriptive vocabulary. A
+  single-maintainer prototype tested by its own author is not an audited system.
 
 ## License
 
