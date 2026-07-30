@@ -16,22 +16,23 @@ companion Obsidian plugin adds an in-app search box and a RAG chat, both showing
 provenance badges from that manifest; an MCP server exposes the same search/chat to
 Claude Desktop, Claude Code, Cursor, and other MCP-compatible clients.
 
-This repository is a direct evolution of an earlier, simpler version — the same
-architecture, extended with the governance layer described above after a
-security-focused review argued that "runs locally" and "is actually governed" are two
-different claims. Both accompanying papers are worth reading together:
+This repository accompanies a single paper documenting the whole project — how it was
+built, what broke, and (after a security-focused review argued that "runs locally"
+and "is actually governed" are two different claims) how it was hardened into
+something closer to a reference architecture:
 
 📄 **[Building a Verifiable Local AI Knowledge System](paper/verifiable-local-ai-knowledge-system.pdf)**
-(also available as [Markdown](paper/verifiable-local-ai-knowledge-system.md)) — this
-repository's paper, covering the control-plane work below in full, including two
+(also available as [Markdown](paper/verifiable-local-ai-knowledge-system.md)) —
+covering the original failure modes, the control-plane work below in full, two
 adversarial findings (a real symlink-based ingestion vulnerability, and inconsistent
-prompt-injection resistance) and a mapping of these controls to NIST's AI Risk
+prompt-injection resistance), and a mapping of these controls to NIST's AI Risk
 Management Framework and OWASP's LLM Top 10 — offered as a shared vocabulary, not a
 compliance claim.
 
-📄 The original paper, *Building a Private Second Brain*, and the simpler codebase it
-describes, remain available at
-[github.com/alebellotta/local-second-brain](https://github.com/alebellotta/local-second-brain).
+An earlier, simpler snapshot of this codebase, from before the control-plane work,
+remains available at
+[github.com/alebellotta/local-second-brain](https://github.com/alebellotta/local-second-brain)
+for anyone who wants to see the system before that phase of the work.
 
 It's meant to be read and adapted, not run as-is out of the box on someone else's
 machine — file paths, model names, and the daily-schedule mechanism are all things
