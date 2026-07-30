@@ -14,6 +14,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
 import common
+import policy
 
 log = common.setup_logging("watcher")
 
@@ -58,9 +59,17 @@ def index_note(path: Path) -> None:
     is_generated = bool(re.search(r"^generated_from_source:\s*true", raw_text, flags=re.MULTILINE))
     content, stored_hash = _split_content_and_suggestions(raw_text) if is_generated else (raw_text, None)
 
-    chunks = common.chunk_markdown(content)
     collection = common.get_collection()
     collection.delete(where={"path": rel})
+
+    if re.search(r'^policy_decision:\s*"quarantine"', raw_text, flags=re.MULTILINE):
+        log.warning(
+            "Skipping semantic embedding and AI tag/link suggestions for quarantined note: %s "
+            "(indexed by path/content_hash only — see its frontmatter for why)", rel
+        )
+        return
+
+    chunks = common.chunk_markdown(content)
 
     if not chunks:
         log.info("Empty note, removed from index: %s", rel)
@@ -487,6 +496,15 @@ def reconcile_on_startup() -> None:
 def main() -> None:
     common.VAULT_DIR.mkdir(parents=True, exist_ok=True)
     log.info("Starting watcher on %s", common.VAULT_DIR)
+
+    cloud_marker = policy.detect_cloud_sync(common.VAULT_DIR)
+    if cloud_marker:
+        log.warning(
+            "VAULT_DIR resolves through a cloud-sync path (matched %r): local AI processing does "
+            "not imply local storage — everything written to the vault is syncing to that service. "
+            "See the paper's finding on this if it's unexpected.", cloud_marker,
+        )
+
     reconcile_on_startup()
 
     # PollingObserver instead of the default: the native FSEvents backend

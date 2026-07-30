@@ -8,9 +8,13 @@ immediate reactivity isn't needed.
 Notes generated here are NEVER automatically deleted if the external file
 disappears (unlike the Sources/ pipeline): they act as an archive.
 """
+import hashlib
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import common
+import policy
 
 try:
     from external_folders_config import EXTERNAL_FOLDERS
@@ -22,8 +26,6 @@ except ImportError:
 
 log = common.setup_logging("index_external")
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB: above this, reading the file (and possibly downloading it from the cloud) is too costly
-
 
 def index_one(source: Path, notes_name: str) -> None:
     if not source.exists():
@@ -32,7 +34,7 @@ def index_one(source: Path, notes_name: str) -> None:
 
     notes_root = common.NOTES_DIR / notes_name
     indexed = 0
-    skipped_large = 0
+    skipped_by_policy = 0  # oversized, or a symlink escaping this specific external folder
     skipped_redundant = 0
 
     candidates = []
@@ -41,13 +43,10 @@ def index_one(source: Path, notes_name: str) -> None:
             continue
         if src_file.suffix.lower() not in common.SOURCE_EXTRACTORS:
             continue
-        try:
-            src_stat = src_file.stat()
-        except OSError:
-            log.warning("Could not read %s, skipping", src_file)
-            continue
-        if src_stat.st_size > MAX_FILE_SIZE:
-            skipped_large += 1
+        pre_decision = policy.evaluate(src_file, source)
+        policy.log_decision(common.POLICY_LOG_PATH, src_file, pre_decision)
+        if pre_decision.action == "deny":
+            skipped_by_policy += 1
             continue
         candidates.append(src_file)
 
@@ -84,7 +83,7 @@ def index_one(source: Path, notes_name: str) -> None:
 
         extractor = common.SOURCE_EXTRACTORS[src_file.suffix.lower()]
         try:
-            text = extractor(src_file)
+            text, extraction_meta = extractor(src_file)
         except Exception:
             log.exception("Extraction failed for %s", src_file)
             continue
@@ -92,6 +91,17 @@ def index_one(source: Path, notes_name: str) -> None:
         if not text.strip():
             log.warning("No text extracted from %s", rel)
             continue
+
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        decision = policy.evaluate(src_file, source, text=text)
+        policy.log_decision(common.POLICY_LOG_PATH, src_file, decision, content_hash=content_hash)
+        if decision.action == "quarantine":
+            log.warning(
+                "Note for %s flagged for quarantine (%s): written but not embedded semantically",
+                rel, ", ".join(decision.sensitivity_flags),
+            )
+
+        extra_frontmatter = "".join(f"{key}: {json.dumps(value)}\n" for key, value in extraction_meta.items())
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(
@@ -101,7 +111,16 @@ source_type: "{src_file.suffix.lower().lstrip('.')}"
 source_mtime: {src_stat.st_mtime}
 generated_from_source: true
 external_source: true
----
+content_hash: "{content_hash}"
+resolved_path: "{src_file.resolve().as_posix()}"
+mime_type: "{decision.mime_type or 'unknown'}"
+extractor_version: "{common.EXTRACTOR_VERSIONS.get(src_file.suffix.lower(), 'unknown')}"
+embedding_model: "{common.EMBED_MODEL}"
+chunking_version: "{common.CHUNKING_VERSION}"
+indexed_at: "{datetime.now(timezone.utc).isoformat()}"
+policy_decision: "{decision.action}"
+sensitivity_flags: {json.dumps(decision.sensitivity_flags)}
+{extra_frontmatter}---
 
 # {src_file.stem}
 
@@ -113,8 +132,8 @@ external_source: true
         log.info("Indexed (without copying) %s -> Notes/%s/%s", rel, notes_name, rel.with_name(rel.name + ".md"))
 
     log.info(
-        "External indexing '%s': %d documents updated, %d skipped (>100MB), %d skipped (superseded version/redundant duplicate)",
-        source.name, indexed, skipped_large, skipped_redundant,
+        "External indexing '%s': %d documents updated, %d skipped by policy (oversized/symlink), %d skipped (superseded version/redundant duplicate)",
+        source.name, indexed, skipped_by_policy, skipped_redundant,
     )
 
 

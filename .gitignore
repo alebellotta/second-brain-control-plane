@@ -10,4 +10,6 @@ finetune/adapters/
 
 obsidian-plugin/node_modules/
 
+.pytest_cache/
+
 .DS_Store

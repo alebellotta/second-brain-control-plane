@@ -1,0 +1,2 @@
+-r requirements.txt
+pytest  # for tests/ — the CI workflow only needs requests+watchdog+pytest, see .github/workflows/test.yml

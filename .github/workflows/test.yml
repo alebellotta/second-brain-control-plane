@@ -1,0 +1,25 @@
+name: test
+
+# What this does NOT do, on purpose: GitHub-hosted runners have no GPU and no
+# local Ollama instance, so this workflow cannot exercise anything that calls
+# a model (retrieval quality, tag/link generation, the model-level red-team
+# harness). It runs the deterministic, code-only checks — policy decisions,
+# manifest fields, and tag sanitization — on every push and pull request.
+# Retrieval-quality regression testing (eval/eval_search.py) and the
+# model-level half of redteam/prompt_injection_test.py need Ollama running
+# and are meant to be run locally; see the README.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests watchdog pytest
+      - run: pytest tests/ -v

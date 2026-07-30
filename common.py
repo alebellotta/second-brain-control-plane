@@ -1,13 +1,17 @@
 """Shared helpers for the local second brain: chunking, Ollama calls, Chroma access,
 and document-to-note conversion (PDF/DOCX/PPTX/TXT)."""
+import hashlib
 import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+
+import policy
 
 VAULT_DIR = Path(os.environ.get("SECOND_BRAIN_VAULT", str(Path.home() / "Documents" / "SecondBrain")))
 HOME_DIR = Path(os.environ.get("SECOND_BRAIN_HOME", str(Path.home() / ".second-brain")))
@@ -16,10 +20,25 @@ LOG_DIR = HOME_DIR / "logs"
 SOURCES_DIR = VAULT_DIR / "Sources"
 NOTES_DIR = VAULT_DIR / "Notes"
 
+POLICY_LOG_PATH = LOG_DIR / "policy_decisions.jsonl"
+
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = "nomic-embed-text"
 TAG_MODEL = "llama3.2"
 DIGEST_MODEL = "llama3.2"
+
+# Bumped whenever the extraction logic for a format changes materially enough
+# that previously-generated notes might read differently if reprocessed.
+# Recorded per-note in the frontmatter (extractor_version) so a manifest scan
+# can tell which notes were produced by an older version of the pipeline.
+EXTRACTOR_VERSIONS = {
+    ".pdf": "pdf-pymupdf-v1",
+    ".docx": "docx-python-docx-v1",
+    ".pptx": "pptx-python-pptx-v1",
+    ".txt": "text-plain-v1",
+    ".md": "text-plain-v1",
+}
+CHUNKING_VERSION = "paragraph-blocks-v1"  # bump if chunk_markdown()'s splitting strategy changes
 
 COLLECTION_NAME = "notes"
 
@@ -144,39 +163,64 @@ OCR_MIN_TEXT_LENGTH = 20  # below this, a page is almost certainly image-only
 OCR_LANGUAGES = "eng"  # e.g. "eng+ita" for multilingual OCR; needs the matching tesseract-lang data
 
 
-def _ocr_pdf_page(page, dpi: int = 200) -> str:
+def _ocr_pdf_page(page, dpi: int = 200) -> tuple[str, float | None]:
     """OCR of a rendered PDF page (fallback for scanned PDFs with no text
     layer). Requires the tesseract binary to be installed (e.g.
     brew install tesseract tesseract-lang, or apt install tesseract-ocr on
-    Linux); if missing, fails silently and the page is simply left without text."""
+    Linux); if missing, fails silently and the page is simply left without
+    text. Returns (text, mean_word_confidence_0_to_100_or_None) — the
+    confidence is surfaced in the note's manifest (ocr_confidence) so a low-
+    confidence OCR result is visibly distinguishable from a clean text layer,
+    instead of looking identical in the index."""
     try:
         import io
 
         import pytesseract
         from PIL import Image
     except ImportError:
-        return ""
+        return "", None
 
     pix = page.get_pixmap(dpi=dpi)
     img = Image.open(io.BytesIO(pix.tobytes("png")))
     try:
-        return pytesseract.image_to_string(img, lang=OCR_LANGUAGES).strip()
+        data = pytesseract.image_to_data(img, lang=OCR_LANGUAGES, output_type=pytesseract.Output.DICT)
     except Exception:
         try:
-            return pytesseract.image_to_string(img).strip()
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
         except Exception:
             logging.getLogger("common").exception("OCR failed for page %d", page.number + 1)
-            return ""
+            return "", None
+
+    lines: list[list[str]] = []
+    confidences: list[float] = []
+    current_key = None
+    for i, word in enumerate(data["text"]):
+        word = word.strip()
+        if not word:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        if key != current_key:
+            lines.append([])
+            current_key = key
+        lines[-1].append(word)
+        conf = float(data["conf"][i])
+        if conf >= 0:
+            confidences.append(conf)
+
+    text = "\n".join(" ".join(line) for line in lines)
+    mean_confidence = sum(confidences) / len(confidences) if confidences else None
+    return text, mean_confidence
 
 
-def _extract_pdf(path: Path) -> str:
+def _extract_pdf(path: Path) -> tuple[str, dict]:
     """Text via PyMuPDF, one section per page. If a page has no extractable
     text (typical of a scanned PDF), falls back to local OCR before treating
-    it as empty."""
+    it as empty. Returns (text, metadata) — metadata includes ocr_confidence
+    (average across OCR'd pages, 0-100) only if OCR was actually used."""
     import fitz
 
     parts: list[str] = []
-    ocr_used = False
+    ocr_confidences: list[float] = []
 
     doc = fitz.open(str(path))
     try:
@@ -184,22 +228,27 @@ def _extract_pdf(path: Path) -> str:
             page = doc[page_index]
             text = page.get_text("text").strip()
             if len(text) < OCR_MIN_TEXT_LENGTH:
-                ocr_text = _ocr_pdf_page(page)
+                ocr_text, ocr_confidence = _ocr_pdf_page(page)
                 if len(ocr_text) > len(text):
                     text = ocr_text
-                    ocr_used = True
+                    if ocr_confidence is not None:
+                        ocr_confidences.append(ocr_confidence)
             if text:
                 parts.append(f"## Page {page_index + 1}\n\n{text}")
     finally:
         doc.close()
 
-    if ocr_used:
-        logging.getLogger("common").info("OCR used as fallback for %s", path)
+    metadata = {}
+    if ocr_confidences:
+        metadata["ocr_confidence"] = round(sum(ocr_confidences) / len(ocr_confidences), 1)
+        logging.getLogger("common").info(
+            "OCR used as fallback for %s (mean confidence %.1f)", path, metadata["ocr_confidence"]
+        )
 
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), metadata
 
 
-def _extract_docx(path: Path) -> str:
+def _extract_docx(path: Path) -> tuple[str, dict]:
     """Preserves headings and tables as markdown."""
     import docx
 
@@ -226,10 +275,10 @@ def _extract_docx(path: Path) -> str:
         if md:
             parts.append(md)
 
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), {}
 
 
-def _extract_pptx(path: Path) -> str:
+def _extract_pptx(path: Path) -> tuple[str, dict]:
     """Preserves title/bullets (with indentation), tables as markdown, and speaker
     notes, one section per slide."""
     from pptx import Presentation
@@ -263,11 +312,11 @@ def _extract_pptx(path: Path) -> str:
 
         slides_md.append("\n\n".join(parts))
 
-    return "\n\n".join(slides_md)
+    return "\n\n".join(slides_md), {}
 
 
-def _extract_txt(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="ignore")
+def _extract_txt(path: Path) -> tuple[str, dict]:
+    return path.read_text(encoding="utf-8", errors="ignore"), {}
 
 
 WHISPER_MODEL_SIZE = "small"  # tiny/base/small/medium/large-v3: speed vs. accuracy trade-off on CPU
@@ -288,13 +337,15 @@ def _get_whisper_model():
     return _whisper_model
 
 
-def _extract_audio(path: Path) -> str:
+def _extract_audio(path: Path) -> tuple[str, dict]:
     """Transcribes an audio recording (e.g. a meeting) with local Whisper
     (faster-whisper, CPU with int8 quantization — no dedicated GPU
     acceleration on this class of hardware, see the quantization note
     elsewhere in this file for llama3.2). Each segment becomes a line with a
     timestamp, useful for navigating long recordings without listening to
-    the whole thing again."""
+    the whole thing again. Returns (text, metadata) with the detected
+    language and its confidence, surfaced in the note's manifest the same
+    way OCR confidence is for scanned PDFs."""
     model = _get_whisper_model()
     segments, info = model.transcribe(str(path), language=AUDIO_LANGUAGE)
 
@@ -303,14 +354,19 @@ def _extract_audio(path: Path) -> str:
         for s in segments
         if s.text.strip()
     ]
+    metadata = {
+        "audio_language": info.language,
+        "audio_language_confidence": round(info.language_probability * 100, 1),
+    }
     if not lines:
-        return ""
+        return "", metadata
 
     header = f"Detected language: {info.language} (confidence {info.language_probability:.0%})"
-    return header + "\n\n" + "\n\n".join(lines)
+    return header + "\n\n" + "\n\n".join(lines), metadata
 
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".mp4", ".aac", ".flac"}
+EXTRACTOR_VERSIONS.update({ext: "audio-faster-whisper-v1" for ext in AUDIO_EXTENSIONS})
 
 SOURCE_EXTRACTORS = {
     ".pdf": _extract_pdf,
@@ -439,16 +495,18 @@ def _stored_source_mtime(out_path: Path) -> float | None:
 def convert_source(path: Path) -> Path | None:
     """Extracts text from a document in Sources/ and writes the corresponding
     markdown note in Notes/ (same folder structure). Returns the path of the
-    note written, or None if nothing needed to be (or could be) written."""
+    note written, or None if nothing needed to be (or could be) written.
+
+    Every candidate is run through policy.evaluate() twice: once before
+    reading (path/size — cheap, catches the symlink-escape case without ever
+    touching file content) and once after extraction (content — secrets/PII
+    patterns). Both decisions are appended to the local policy audit log."""
     log = logging.getLogger("common")
 
-    try:
-        path.resolve().relative_to(SOURCES_DIR.resolve())
-    except ValueError:
-        log.warning(
-            "Skipping %s: resolved path points outside Sources/ (likely a symlink), "
-            "not processing it to avoid indexing unintended external files", path
-        )
+    pre_decision = policy.evaluate(path, SOURCES_DIR)
+    if pre_decision.action == "deny":
+        log.warning("Policy denied %s: %s", path, "; ".join(pre_decision.reasons))
+        policy.log_decision(POLICY_LOG_PATH, path, pre_decision)
         return None
 
     out_path = note_path_for_source(path)
@@ -467,7 +525,7 @@ def convert_source(path: Path) -> Path | None:
         return None
 
     try:
-        text = extractor(path)
+        text, extraction_meta = extractor(path)
     except Exception:
         log.exception("Extraction failed for %s", path)
         return None
@@ -475,6 +533,18 @@ def convert_source(path: Path) -> Path | None:
     if not text.strip():
         log.warning("No text extracted from %s (scanned PDF with no OCR?)", path)
         return None
+
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    decision = policy.evaluate(path, SOURCES_DIR, text=text)
+    policy.log_decision(POLICY_LOG_PATH, path, decision, content_hash=content_hash)
+    if decision.action == "quarantine":
+        log.warning(
+            "Note for %s flagged for quarantine (%s): will be written but not embedded "
+            "semantically — see policy_decision/sensitivity_flags in its frontmatter",
+            path, ", ".join(decision.sensitivity_flags),
+        )
+
+    extra_frontmatter = "".join(f"{key}: {json.dumps(value)}\n" for key, value in extraction_meta.items())
 
     rel = path.relative_to(SOURCES_DIR)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -484,7 +554,16 @@ source_file: "{rel.as_posix()}"
 source_type: "{path.suffix.lower().lstrip('.')}"
 source_mtime: {current_source_mtime}
 generated_from_source: true
----
+content_hash: "{content_hash}"
+resolved_path: "{path.resolve().as_posix()}"
+mime_type: "{decision.mime_type or 'unknown'}"
+extractor_version: "{EXTRACTOR_VERSIONS.get(path.suffix.lower(), 'unknown')}"
+embedding_model: "{EMBED_MODEL}"
+chunking_version: "{CHUNKING_VERSION}"
+indexed_at: "{datetime.now(timezone.utc).isoformat()}"
+policy_decision: "{decision.action}"
+sensitivity_flags: {json.dumps(decision.sensitivity_flags)}
+{extra_frontmatter}---
 
 # {path.stem}
 

@@ -1,0 +1,26 @@
+[
+  {
+    "query": "Did any of our shipping suppliers ask for a price increase this year?",
+    "expected_path": "Notes/vendor-renewal.md"
+  },
+  {
+    "query": "What did finance decide about spending for the last quarter of the year?",
+    "expected_path": "Notes/budget-approval.md"
+  },
+  {
+    "query": "What did the external auditors find wrong with our access controls?",
+    "expected_path": "Notes/security-audit.md"
+  },
+  {
+    "query": "When is the engineering team getting together in person this year?",
+    "expected_path": "Notes/team-offsite.md"
+  },
+  {
+    "query": "How did the campaign landing page perform after we announced the new product?",
+    "expected_path": "Notes/product-launch-marketing.md"
+  },
+  {
+    "query": "Was there an incident during the deployment of the new product?",
+    "expected_path": "Notes/product-launch-engineering.md"
+  }
+]
