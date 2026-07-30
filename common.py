@@ -116,36 +116,53 @@ def ollama_embed(text: str) -> list[float] | None:
         return None
 
 
-def ollama_generate(model: str, prompt: str) -> str | None:
+def system_user_messages(system: str, user: str) -> list[dict]:
+    """Convenience for the common case: a single system instruction plus one
+    block of (often untrusted) content. Callers that need real multi-turn
+    history (chat.py) build their own messages list instead of using this."""
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def ollama_chat(model: str, messages: list[dict]) -> str | None:
+    """Calls Ollama's /api/chat (not /api/generate): messages carry explicit
+    roles instead of being concatenated into one prompt string. This gives
+    the model an explicit instruction-vs-data boundary — untrusted note
+    content always goes in a `user` message, never mixed into the `system`
+    instructions — which most instruct models are trained to weight
+    differently. This is a mitigation, not a guarantee: see the paper's
+    findings on prompt injection for what this does and doesn't stop."""
     try:
         resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": model, "messages": messages, "stream": False},
             timeout=180,
         )
         resp.raise_for_status()
-        return resp.json()["response"].strip()
+        return resp.json()["message"]["content"].strip()
     except Exception:
-        logging.getLogger("common").exception("Ollama generation error")
+        logging.getLogger("common").exception("Ollama chat error")
         return None
 
 
-def ollama_generate_json(model: str, prompt: str, schema: dict) -> dict | None:
-    """Like ollama_generate, but constrains the output to a JSON schema
-    (natively supported by Ollama via the "format" parameter). More robust
-    than free-text parsing for structured data: the model only has to choose
-    the values, not also guess the exact syntax to follow — this removes a
-    whole class of parsing failures without needing a more elaborate prompt."""
+def ollama_chat_json(model: str, messages: list[dict], schema: dict) -> dict | None:
+    """Like ollama_chat, but constrains the output to a JSON schema (natively
+    supported by Ollama via the "format" parameter). More robust than
+    free-text parsing for structured data: the model only has to choose the
+    values, not also guess the exact syntax to follow — this removes a whole
+    class of parsing failures without needing a more elaborate prompt. Note
+    that the schema constrains the response's SHAPE, not the CONTENT of each
+    string field — see watcher.py's _sanitize_tag() for why that distinction
+    matters in practice."""
     try:
         resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "format": schema, "stream": False},
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": model, "messages": messages, "format": schema, "stream": False},
             timeout=180,
         )
         resp.raise_for_status()
-        return json.loads(resp.json()["response"])
+        return json.loads(resp.json()["message"]["content"])
     except Exception:
-        logging.getLogger("common").exception("Ollama structured-output error")
+        logging.getLogger("common").exception("Ollama structured chat error")
         return None
 
 
